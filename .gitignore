@@ -1,0 +1,12 @@
+# Compiled binaries
+*.dll
+*.exe
+*.o
+*.obj
+
+# Python
+__pycache__/
+*.pyc
+
+# Windows registry
+*.reg
