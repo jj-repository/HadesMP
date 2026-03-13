@@ -1,5 +1,9 @@
 # HadesMP - Multiplayer Mod for Hades
 
+> **WARNING: This project is a Work In Progress and is NOT functional yet.**
+> Everything is experimental — expect broken builds, missing features, and incomplete systems.
+> Contributions and feedback are welcome, but do not expect a playable experience at this stage.
+
 A multiplayer mod for [Hades](https://store.steampowered.com/app/1145360/Hades/) (Supergiant Games) using DLL proxy injection to intercept Lua calls and bridge game state between players.
 
 ## How It Works
