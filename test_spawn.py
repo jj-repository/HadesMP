@@ -22,7 +22,8 @@ from pathlib import Path
 
 # Import the bridge from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
-from hadesmp_bridge import HadesMPBridge, DEFAULT_GAME_DIR
+from hadesmp_bridge import HadesMPBridge
+from hadesmp_platform import detect_game_dir
 
 
 class SpawnTest:
@@ -142,8 +143,8 @@ def wait_for_bridge(bridge: HadesMPBridge, timeout: float = 30.0) -> bool:
 def main():
     parser = argparse.ArgumentParser(description="HadesMP Entity Spawn Feasibility Test")
     parser.add_argument(
-        "--game-dir", type=Path, default=DEFAULT_GAME_DIR,
-        help=f"Path to Hades x64Vk directory (default: {DEFAULT_GAME_DIR})",
+        "--game-dir", type=Path, default=None,
+        help="Path to Hades game subdirectory (auto-detected if omitted)",
     )
     parser.add_argument(
         "--timeout", type=float, default=5.0,
@@ -155,7 +156,17 @@ def main():
     )
     args = parser.parse_args()
 
-    game_dir = args.game_dir.resolve()
+    if args.game_dir:
+        game_dir = args.game_dir.resolve()
+    else:
+        try:
+            config = detect_game_dir()
+            game_dir = config.game_dir
+            print(f"[test] auto-detected game dir: {game_dir}")
+        except FileNotFoundError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+
     if not game_dir.is_dir():
         print(f"error: {game_dir} is not a directory", file=sys.stderr)
         sys.exit(1)

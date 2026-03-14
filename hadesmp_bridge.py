@@ -2,12 +2,14 @@
 """
 HadesMP Bridge — Python-side IPC for the HadesMP multiplayer mod.
 
-Communicates with the Lua bridge running inside Hades (via Wine/Proton):
+Communicates with the Lua bridge running inside Hades:
   - Lua→Python: tails hades_lua_stdout.log for HADESMP: prefixed lines
   - Python→Lua: writes hadesmp_inbox.lua atomically for Lua to dofile()
 
+Supports native Windows, WSL2, and Linux/Proton via hadesmp_platform.
+
 Usage:
-    python3 hadesmp_bridge.py [--game-dir /path/to/Hades/x64Vk]
+    python3 hadesmp_bridge.py [--game-dir /path/to/Hades/x64] [--mode solo|host|client]
 """
 
 import argparse
@@ -19,8 +21,8 @@ import threading
 import time
 from pathlib import Path
 
-# Default game directory (x64Vk is the CWD when Hades runs)
-DEFAULT_GAME_DIR = Path("/mnt/ext4gamedrive/SteamLibrary/steamapps/common/Hades/x64Vk")
+sys.path.insert(0, str(Path(__file__).parent))
+from hadesmp_platform import detect_game_dir, detect_platform
 
 STDOUT_LOG = "hades_lua_stdout.log"
 INBOX_FILE = "hadesmp_inbox.lua"
@@ -187,8 +189,9 @@ class InboxWriter:
 class HadesMPBridge:
     """Main bridge: ties StdoutWatcher + InboxWriter together."""
 
-    def __init__(self, game_dir: Path):
+    def __init__(self, game_dir: Path, mode: str = "solo"):
         self.game_dir = game_dir
+        self.mode = mode  # "solo", "host", or "client"
         self.watcher = StdoutWatcher(game_dir / STDOUT_LOG)
         self.writer = InboxWriter(game_dir / INBOX_FILE)
 
@@ -211,6 +214,12 @@ class HadesMPBridge:
         self._p2_event = threading.Event()  # signals when a P2EVT arrives
         self._p1pos_count = 0
 
+        # Lua mod bootstrap
+        self._mod_bootstrapped = False
+
+        # Networking (initialized in start() if mode != solo)
+        self.net = None
+
         # Message log for debugging
         self.message_log: list[tuple[float, str, str]] = []  # (time, type, payload)
         self._max_log = 100
@@ -218,17 +227,41 @@ class HadesMPBridge:
         # Register handlers
         self.watcher.add_callback(self._on_message)
 
-    def start(self):
-        """Start the watcher thread."""
+    def start(self, net_host: str = "", net_port: int = 0, player_name: str = "Player"):
+        """Start the watcher thread and optionally networking."""
         log_path = self.game_dir / STDOUT_LOG
         if not log_path.exists():
             print(f"[bridge] warning: {log_path} not found — waiting for game to start")
         self.watcher.start()
         print(f"[bridge] watching {log_path}")
         print(f"[bridge] inbox at {self.game_dir / INBOX_FILE}")
+        print(f"[bridge] mode: {self.mode}")
+
+        # Start networking if not solo
+        if self.mode in ("host", "client"):
+            from hadesmp_net import HadesMPNet, MsgType, DEFAULT_TCP_PORT, DEFAULT_UDP_PORT
+            tcp_port = net_port or DEFAULT_TCP_PORT
+            udp_port = (net_port + 1) if net_port else DEFAULT_UDP_PORT
+
+            self.net = HadesMPNet(is_host=(self.mode == "host"), player_name=player_name)
+
+            # Register network callbacks
+            self.net.on(MsgType.POSITION, self._on_net_position)
+            self.net.on(MsgType.ROOM_TRANSITION, self._on_net_room)
+            self.net.on(MsgType.GAME_EVENT, self._on_net_event)
+
+            if self.mode == "host":
+                self.net.start_host(tcp_port=tcp_port, udp_port=udp_port)
+            else:
+                if not net_host:
+                    print("[bridge] error: --host required for client mode", file=sys.stderr)
+                    sys.exit(1)
+                self.net.start_client(net_host, tcp_port=tcp_port, udp_port=udp_port)
 
     def stop(self):
         self.watcher.stop()
+        if self.net:
+            self.net.stop()
 
     def _on_message(self, msg_type: str, payload: str):
         """Handle incoming messages from Lua."""
@@ -250,6 +283,9 @@ class HadesMPBridge:
         elif msg_type == "HB":
             self.last_heartbeat = now
             self.heartbeat_count += 1
+            # Bootstrap Lua mod on first heartbeat
+            if not self._mod_bootstrapped:
+                self._bootstrap_mod()
 
         elif msg_type == "ACK":
             try:
@@ -304,12 +340,18 @@ class HadesMPBridge:
                 try:
                     self.p1_position = (float(parts[0]), float(parts[1]), float(parts[2]))
                     self._p1pos_count += 1
+                    # Forward P1 position to network peer
+                    if self.net and self.net.peer.connected:
+                        self.net.send_position(*self.p1_position)
                 except ValueError:
                     pass
 
         elif msg_type == "ROOM":
             self.current_room = payload
             print(f"[bridge] ROOM: {payload}")
+            # Forward room transition to network peer
+            if self.net and self.net.peer.connected:
+                self.net.send_room_transition(payload)
 
         elif msg_type == "HOOK_ERR":
             print(f"[bridge] HOOK ERROR: {payload}")
@@ -320,6 +362,39 @@ class HadesMPBridge:
 
         else:
             print(f"[bridge] unknown: {msg_type}:{payload}")
+
+    def _bootstrap_mod(self):
+        """Auto-load the Lua mod on first heartbeat."""
+        mod_path = self.game_dir.parent / "Content" / "Mods" / "HadesMP" / "HadesMP.lua"
+        if mod_path.exists():
+            # Use forward slashes for Lua dofile path
+            lua_path = "Content/Mods/HadesMP/HadesMP.lua"
+            self.exec_lua(f'dofile("{lua_path}")')
+            self._mod_bootstrapped = True
+            print(f"[bridge] bootstrapping Lua mod: {lua_path}")
+        else:
+            # No mod files deployed — bootstrap not possible but that's OK for tests
+            self._mod_bootstrapped = True
+            print(f"[bridge] no mod at {mod_path} — skipping bootstrap")
+
+    # ---- Network event handlers ----
+
+    def _on_net_position(self, msg):
+        """Remote player position received — write P2SYNC to local game."""
+        p = msg.payload
+        x, y, angle = p.get("x", 0), p.get("y", 0), p.get("a", 0)
+        anim = p.get("n", "")
+        self.p2_sync(x, y, angle, anim)
+
+    def _on_net_room(self, msg):
+        """Remote room transition — log it."""
+        room = msg.payload.get("room", "?")
+        print(f"[net] Peer entered room: {room}")
+
+    def _on_net_event(self, msg):
+        """Remote game event received."""
+        evt = msg.payload.get("type", "?")
+        print(f"[net] Game event from peer: {evt}")
 
     def ping(self) -> int:
         """Send a PING and track it for RTT measurement."""
@@ -569,28 +644,63 @@ def main():
     parser.add_argument(
         "--game-dir",
         type=Path,
-        default=DEFAULT_GAME_DIR,
-        help=f"Path to Hades x64Vk directory (default: {DEFAULT_GAME_DIR})",
+        default=None,
+        help="Path to Hades game subdirectory (auto-detected if omitted)",
     )
     parser.add_argument(
         "--replay",
         action="store_true",
         help="Replay existing log from the beginning instead of tailing",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["solo", "host", "client"],
+        default="solo",
+        help="Networking mode (default: solo)",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="",
+        help="Host IP to connect to (required for --mode client)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="TCP port (default: 26000)",
+    )
+    parser.add_argument(
+        "--name",
+        type=str,
+        default="Player",
+        help="Player name for networking",
+    )
     args = parser.parse_args()
 
-    game_dir = args.game_dir.resolve()
+    # Resolve game directory
+    if args.game_dir:
+        game_dir = args.game_dir.resolve()
+    else:
+        try:
+            config = detect_game_dir()
+            game_dir = config.game_dir
+            print(f"[bridge] auto-detected game dir: {game_dir}")
+        except FileNotFoundError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+
     if not game_dir.is_dir():
         print(f"error: {game_dir} is not a directory", file=sys.stderr)
         sys.exit(1)
 
-    bridge = HadesMPBridge(game_dir)
+    bridge = HadesMPBridge(game_dir, mode=args.mode)
 
     if args.replay:
         # Start from beginning of file instead of end
         bridge.watcher._last_size = 0
 
-    bridge.start()
+    bridge.start(net_host=args.host, net_port=args.port, player_name=args.name)
 
     try:
         run_cli(bridge)
