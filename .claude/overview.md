@@ -1,6 +1,6 @@
 # Overview
 
-v0.1.0 WIP — Multiplayer co-op mod for Hades. Each player controls local hero (zero input lag), state synced via Python bridge + TCP/UDP.
+v0.02 WIP — Multiplayer co-op mod for Hades. Each player controls local hero (zero input lag), state synced via Python bridge + TCP/UDP.
 
 ## Files
 **C (DLL Proxies):** `lua52_proxy.c`, `version_proxy.c`, `stdout_redirect.c`, `lua52.def`

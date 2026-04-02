@@ -12,7 +12,7 @@ body:
     attributes:
       label: Version
       description: Which version are you using?
-      placeholder: v0.1.0
+      placeholder: v0.02
     validations:
       required: true
 

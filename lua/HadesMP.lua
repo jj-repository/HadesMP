@@ -9,7 +9,7 @@
 
 local HadesMP = {}
 
-HadesMP.Version = "0.1.0"
+HadesMP.Version = "0.02"
 HadesMP.Initialized = false
 HadesMP.LastInboxSeq = 0
 HadesMP.HeartbeatInterval = 0.1  -- seconds
