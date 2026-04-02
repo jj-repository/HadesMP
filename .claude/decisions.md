@@ -3,7 +3,7 @@
 ## Design Decisions
 | Decision | Rationale |
 |----------|-----------|
-| DLL proxy (not StyxScribe) | Works without ModImporter dependency |
+| DLL proxy (not StyxScribe) | Works without ModImporter dependency. **Do NOT introduce StyxScribe** — MULTIPLAYER-MOD.md references it but that's outdated design thinking. The actual implementation uses DLL proxy + file IPC only. |
 | File-based IPC (not pipes) | More reliable across Wine/Proton boundary |
 | Dual-instance architecture | Each player controls local hero, zero input lag |
 | Python bridge | Fast iteration; IPC/networking don't need native speed |
